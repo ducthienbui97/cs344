@@ -80,6 +80,71 @@
 */
 
 #include "utils.h"
+#include <stdio.h>
+#include <float.h>
+
+__global__ void findMin(float * d_out, float * d_in){
+    int myId = threadIdx.x + blockDim.x * blockIdx.x;
+    int tid  = threadIdx.x;
+    if(tid == 0){
+      d_out[blockIdx.x] = FLT_MAX;
+    }
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1){
+        if (tid < s && d_in[myId] > d_in[myId + s]){
+            d_in[myId] = d_in[myId + s];
+        }
+        if ((s&1) && tid == s - 1 && d_out[blockIdx.x] > d_in[myId]){
+          d_out[blockIdx.x] = d_in[myId];
+        }
+        __syncthreads(); 
+    }
+}
+__global__ void findMax(float * d_out, float * d_in){
+    int myId = threadIdx.x + blockDim.x * blockIdx.x;
+    int tid  = threadIdx.x;
+    if(tid == 0){
+      d_out[blockIdx.x] = -FLT_MAX;
+    }
+    __syncthreads();
+    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1){
+        if (tid < s && d_in[myId] < d_in[myId + s]){
+            d_in[myId] = d_in[myId + s];
+        }
+        if ((s&1) && tid == s - 1 && d_out[blockIdx.x] < d_in[myId]){
+          d_out[blockIdx.x] = d_in[myId];
+        }
+        __syncthreads(); 
+    }
+}
+
+__global__ void calBin(const float logLumMin,const float logLumRange,
+                      const float* const d_logLuminance,
+                      unsigned int* d_bin,const size_t numBins,
+                      const size_t numRows, const size_t numCols)
+{
+    int row = threadIdx.x;
+    int col = blockIdx.x;
+    int myId = row*numCols + col;
+
+    unsigned int bin = min(static_cast<unsigned int>(numBins - 1),
+                           static_cast<unsigned int>((d_logLuminance[myId] - logLumMin) / logLumRange * numBins));
+    atomicAdd(d_bin + bin,1);
+}
+
+__global__ void calCdf(unsigned int* const d_cdf, unsigned int* d_bin, const size_t numBins){
+  int idx = threadIdx.x;
+  d_cdf[idx] = d_bin[idx];
+  __syncthreads();
+  for(int s = 1; s < numBins; s <<=1){
+    unsigned int value = 0;
+    if(idx >= s)
+      value = d_cdf[idx - s];
+    __syncthreads();
+    d_cdf[idx] += value;
+    __syncthreads();
+  }
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -89,7 +154,52 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
+  float *d_min;
+  float *d_max;
+  float *d_range;
+  float *d_intermediate;
+  float *d_logLuminance_min;
+  float *d_logLuminance_max;
+  unsigned int *d_bin;
+  
+  checkCudaErrors(cudaMalloc(&d_min, sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_max, sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_range, sizeof(float)));
+  checkCudaErrors(cudaMalloc(&d_intermediate, sizeof(float)*numCols));
+  checkCudaErrors(cudaMalloc(&d_logLuminance_min, sizeof(float)*numCols*numRows));
+  checkCudaErrors(cudaMalloc(&d_logLuminance_max, sizeof(float)*numCols*numRows));
+  checkCudaErrors(cudaMalloc(&d_bin, sizeof(unsigned int)*numBins));
+
+  checkCudaErrors(cudaMemcpy(d_logLuminance_max, d_logLuminance, sizeof(float)*numCols*numRows, cudaMemcpyDeviceToDevice));
+  checkCudaErrors(cudaMemcpy(d_logLuminance_min, d_logLuminance, sizeof(float)*numCols*numRows, cudaMemcpyDeviceToDevice));
+
+  checkCudaErrors(cudaMemset(d_bin, 0, sizeof(unsigned int)*numBins));
+
+
+  findMin <<<numCols, numRows>>>  (d_intermediate, d_logLuminance_min);
+  findMin <<<1, numCols>>> (d_min, d_intermediate);
+
+  findMax <<<numCols, numRows>>>  (d_intermediate, d_logLuminance_max);
+  findMax <<<1, numCols>>> (d_max, d_intermediate);
+
+  cudaMemcpy(&max_logLum, d_max, sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(&min_logLum, d_min, sizeof(float), cudaMemcpyDeviceToHost);
+  printf("%f %f\n", min_logLum, max_logLum);
+
+  calBin <<<numCols, numRows>>> (min_logLum, max_logLum - min_logLum, d_logLuminance, d_bin, numBins, numRows, numCols);
+
+
+  calCdf <<<1, numBins>>> (d_cdf, d_bin, numBins);
+  
+  checkCudaErrors(cudaFree(d_min));
+  checkCudaErrors(cudaFree(d_max));
+  checkCudaErrors(cudaFree(d_range));
+  checkCudaErrors(cudaFree(d_intermediate));
+  checkCudaErrors(cudaFree(d_logLuminance_min));
+  checkCudaErrors(cudaFree(d_logLuminance_max));
+  checkCudaErrors(cudaFree(d_bin));
+ 
+  
   /*Here are the steps you need to implement
     1) find the minimum and maximum value in the input logLuminance channel
        store in min_logLum and max_logLum
