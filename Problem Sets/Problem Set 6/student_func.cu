@@ -48,9 +48,9 @@
 
    Follow these steps to implement one iteration:
 
-   1) For every pixel p in the interior, compute two sums over the four neighboring pixels:
+   1) For every pixel p in the F, compute two sums over the four neighboring pixels:
       Sum1: If the neighbor is in the interior then += ImageGuess_prev[neighbor]
-             else if the neighbor in on the border then += DestinationImg[neighbor]
+            else if the neighbor in on the border then += DestinationImg[neighbor]
 
       Sum2: += SourceImg[p] - SourceImg[neighbor]   (for all four neighbors)
 
@@ -66,12 +66,166 @@
 
 #include "utils.h"
 #include <thrust/host_vector.h>
+#include <stdio.h>
 
+__global__ void findBorder(const uchar4* const d_sourceImg,
+                            unsigned int* d_count,
+                            float* d_red,
+                            float* d_green,
+                            float* d_blue)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if(d_sourceImg[idx].x != 255 ||  d_sourceImg[idx].y != 255 || d_sourceImg[idx].z != 255){
+        if(threadIdx.x >= 1) atomicAdd(&d_count[idx - 1], 1);
+        if(threadIdx.x + 1 < blockDim.x) atomicAdd(&d_count[idx + 1], 1);
+        if(blockIdx.x  >= 1) atomicAdd(&d_count[idx - blockDim.x], 1);
+        if(blockIdx.x + 1 < gridDim.x) atomicAdd(&d_count[idx + blockDim.x], 1);
+        atomicAdd(&d_count[idx], 1);
+    }
+    d_red[idx] = d_sourceImg[idx].x;
+    d_green[idx] = d_sourceImg[idx].y;
+    d_blue[idx] = d_sourceImg[idx].z;
+}
+__global__ void initialize(const uchar4* const d_sourceImg,
+                            const uchar4* const d_destImg,
+                            unsigned int* d_count,
+                            float* d_red,
+                            float* d_green,
+                            float* d_blue,
+                            float* d_dif_red,
+                            float* d_dif_green,
+                            float* d_dif_blue)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if(d_sourceImg[idx].x != 255 ||  d_sourceImg[idx].y != 255 || d_sourceImg[idx].z != 255){
+        if(d_count[idx] == 5){
+            d_dif_red[idx] = 4.f*d_sourceImg[idx].x - d_sourceImg[idx - 1].x
+                                                     - d_sourceImg[idx + 1].x
+                                                     - d_sourceImg[idx - blockDim.x].x
+                                                     - d_sourceImg[idx + blockDim.x].x;
+            d_dif_green[idx] = 4.f*d_sourceImg[idx].y - d_sourceImg[idx - 1].y
+                                                       - d_sourceImg[idx + 1].y
+                                                       - d_sourceImg[idx - blockDim.x].y
+                                                       - d_sourceImg[idx + blockDim.x].y;
+            d_dif_blue[idx] = 4.f*d_sourceImg[idx].z - d_sourceImg[idx - 1].z
+                                                      - d_sourceImg[idx + 1].z
+                                                      - d_sourceImg[idx - blockDim.x].z
+                                                      - d_sourceImg[idx + blockDim.x].z;
+        }else{
+            d_red[idx] = d_destImg[idx].x;
+            d_green[idx]= d_destImg[idx].y;
+            d_blue[idx] = d_destImg[idx].z;
+        }
+    }
+}
+__global__ void run(const uchar4* const d_sourceImg,
+                    unsigned int* d_count,
+                    float* d_prev_r,
+                    float* d_prev_g,
+                    float* d_prev_b,
+                    float* d_next_r,
+                    float* d_next_g,
+                    float* d_next_b,
+                    float* d_dif_r,
+                    float* d_dif_g,
+                    float* d_dif_b)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if(d_count[idx] == 5){
+        d_next_r[idx] = min(255.f,max(0.f, ( d_dif_r[idx]
+                                             + d_prev_r[idx - 1]
+                                             + d_prev_r[idx + 1]
+                                             + d_prev_r[idx - blockDim.x]
+                                             + d_prev_r[idx + blockDim.x])/4.f));    
+        d_next_g[idx] = min(255.f,max(0.f, ( d_dif_g[idx]
+                                             + d_prev_g[idx - 1]
+                                             + d_prev_g[idx + 1]
+                                             + d_prev_g[idx - blockDim.x]
+                                             + d_prev_g[idx + blockDim.x])/4.f));
+        d_next_b[idx] = min(255.f,max(0.f, ( d_dif_b[idx]
+                                             + d_prev_b[idx - 1]
+                                             + d_prev_b[idx + 1]
+                                             + d_prev_b[idx - blockDim.x]
+                                             + d_prev_b[idx + blockDim.x])/4.f));
+    }
+    else{
+        d_next_r[idx] = d_prev_r[idx];
+        d_next_g[idx] = d_prev_g[idx];
+        d_next_b[idx] = d_prev_b[idx];
+    }
+}
+
+__global__ void finalize(uchar4* d_blendedImg,
+                        uchar4* d_destImg,
+                        unsigned int* d_count,
+                        float* d_red,
+                        float* d_green,
+                        float* d_blue)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if(d_count[idx] == 5){
+        d_blendedImg[idx].x = d_red[idx];
+        d_blendedImg[idx].y = d_green[idx];
+        d_blendedImg[idx].z = d_blue[idx];
+        
+    }else{
+        d_blendedImg[idx] = d_destImg[idx];
+    }
+}
 void your_blend(const uchar4* const h_sourceImg,  //IN
                 const size_t numRowsSource, const size_t numColsSource,
                 const uchar4* const h_destImg, //IN
                 uchar4* const h_blendedImg) //OUT
 {
+    uchar4* d_sourceImg;
+    uchar4* d_destImg;
+    uchar4* d_blendedImg;
+    unsigned int* d_count;
+    float *d_dif_r,*d_dif_g,*d_dif_b;
+    float *d_prev_r,*d_prev_g,*d_prev_b;
+    float *d_next_r,*d_next_g,*d_next_b;
+
+    checkCudaErrors(cudaMalloc(&d_blendedImg, sizeof(uchar4)*numRowsSource*numColsSource));    
+    checkCudaErrors(cudaMalloc(&d_sourceImg, sizeof(uchar4)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_destImg, sizeof(uchar4)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_count, sizeof(unsigned int)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_dif_r, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_dif_g, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_dif_b, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_prev_r, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_prev_g, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_prev_b, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_next_r, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_next_g, sizeof(float)*numRowsSource*numColsSource));
+    checkCudaErrors(cudaMalloc(&d_next_b, sizeof(float)*numRowsSource*numColsSource));
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    
+    
+    checkCudaErrors(cudaMemcpy(d_sourceImg, h_sourceImg, sizeof(uchar4)*numRowsSource*numColsSource, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_destImg, h_destImg, sizeof(uchar4)*numRowsSource*numColsSource, cudaMemcpyHostToDevice));
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaMemset(d_count, 0, sizeof(unsigned int)*numRowsSource*numColsSource));
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    
+    findBorder <<<numRowsSource,numColsSource>>> (d_sourceImg, d_count, d_prev_r, d_prev_g, d_prev_b);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    initialize <<<numRowsSource,numColsSource>>> (d_sourceImg, d_destImg, d_count, d_prev_r, d_prev_g, d_prev_b, d_dif_r, d_dif_g, d_dif_b);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    for(int i=0;i < 800; i++){
+        run <<<numRowsSource,numColsSource>>> (d_sourceImg, d_count, d_prev_r, d_prev_g, d_prev_b, d_next_r, d_next_g, d_next_b, d_dif_r, d_dif_g, d_dif_b);    
+        cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+        std::swap(d_next_r, d_prev_r);
+        std::swap(d_next_g, d_prev_g);
+        std::swap(d_next_b, d_prev_b);
+    }
+    finalize <<<numRowsSource,numColsSource>>> (d_blendedImg, d_destImg, d_count, d_prev_r, d_prev_g, d_prev_b);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaMemcpy(h_blendedImg, d_blendedImg, sizeof(uchar4)*numRowsSource*numColsSource, cudaMemcpyDeviceToHost));
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   /* To Recap here are the steps you need to implement
   
