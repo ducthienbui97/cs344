@@ -23,8 +23,17 @@ __device__ unsigned int shared_reduce(unsigned int p, volatile unsigned int * s)
     // You should execute no more than 5 + operations (if you're doing
     // 31, you're doing it wrong)
     //
-    // TODO: Fill in the rest of this function
-
+    s[threadIdx.x] = p;
+    __syncthreads();
+    for(int i = 16; i > 0; i>>=1){
+        unsigned int val = 0;
+        if(threadIdx.x < i){
+            val = s[threadIdx.x + i];
+        }
+        __syncthreads();
+        s[threadIdx.x] += val;
+        __syncthreads();
+    }
     return s[0];
 }
 

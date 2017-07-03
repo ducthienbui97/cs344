@@ -16,8 +16,26 @@ __global__ void batcherBitonicMergesort64(float * d_out, const float * d_in)
     for (int stage = 0; stage <= 5; stage++)
     {
         for (int substage = stage; substage >= 0; substage--)
-        {
-            // TODO
+        {   
+            int block_size = 2<<stage;
+            bool is_down = (tid >> substage)&1;
+            int other;
+            float otherVal;
+            float current = sdata[tid];
+            if(is_down)
+                other = tid - (1<<substage);
+            else
+                other = tid + (1<<substage);
+            otherVal = sdata[other];
+            if((tid>>(stage+1))&1) is_down = !is_down;
+            __syncthreads();
+            if(is_down) 
+                sdata[tid] = max(current,otherVal);
+            else
+                sdata[tid] = min(current,otherVal);
+            __syncthreads();
+            
+            
         }
     }
 

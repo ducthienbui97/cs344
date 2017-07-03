@@ -23,8 +23,18 @@ __device__ unsigned int warp_reduce(unsigned int p, volatile unsigned int * s) {
     // Sums p across warp, returning the result.
     // You can do this without using the character '+' in your code at all
     //
-    // TODO: Fill in the rest of this function
-    //
+    s[threadIdx.x] = p << threadIdx.x;
+    __syncthreads();
+    for(int i = 16; i > 0; i>>=1){
+        unsigned int val = 0;
+        if(threadIdx.x < i){
+            val = s[threadIdx.x + i];
+        }
+        __syncthreads();
+        s[threadIdx.x] |= val;
+        __syncthreads();
+    }
+    return __popc(s[0]);
 }
 
 __global__ void reduce(unsigned int * d_out_warp, 
